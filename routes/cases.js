@@ -9,46 +9,51 @@ import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
 
+// Helper to safely evaluate field presence without truthiness edge-cases (e.g., numeric 0)
+const isFieldPresent = (field) => {
+  return field && field.value !== null && field.value !== undefined && String(field.value).trim() !== '';
+};
+
 // Helper function to evaluate LMPC compliance rules from the direct JSON structure
 const evaluateLmpcRules = (aiData) => {
   const rules = [
     {
       ruleId: 'mrp_present',
       ruleName: 'MRP Declaration',
-      status: aiData.mrp?.value ? 'PASS' : 'FAIL',
-      message: aiData.mrp?.value 
+      status: isFieldPresent(aiData.mrp) ? 'PASS' : 'FAIL',
+      message: isFieldPresent(aiData.mrp) 
         ? `MRP declared: ${aiData.mrp.unit || '₹'} ${aiData.mrp.value}` 
         : 'Maximum Retail Price (MRP) declaration missing'
     },
     {
       ruleId: 'net_qty_present',
       ruleName: 'Net Quantity Standard',
-      status: aiData.net_quantity?.value ? 'PASS' : 'FAIL',
-      message: aiData.net_quantity?.value 
+      status: isFieldPresent(aiData.net_quantity) ? 'PASS' : 'FAIL',
+      message: isFieldPresent(aiData.net_quantity) 
         ? `Net Quantity declared: ${aiData.net_quantity.value} ${aiData.net_quantity.unit || ''}`.trim() 
         : 'Net Quantity declaration missing'
     },
     {
       ruleId: 'mfg_date_present',
       ruleName: 'Date of Manufacture / Packing',
-      status: aiData.manufacture_date?.value ? 'PASS' : 'FAIL',
-      message: aiData.manufacture_date?.value 
+      status: isFieldPresent(aiData.manufacture_date) ? 'PASS' : 'FAIL',
+      message: isFieldPresent(aiData.manufacture_date) 
         ? `Mfg Date declared: ${aiData.manufacture_date.value}` 
         : 'Date of manufacture or packing missing'
     },
     {
       ruleId: 'consumer_care_present',
       ruleName: 'Consumer Care Contact Details',
-      status: aiData.consumer_care?.value ? 'PASS' : 'FAIL',
-      message: aiData.consumer_care?.value 
+      status: isFieldPresent(aiData.consumer_care) ? 'PASS' : 'FAIL',
+      message: isFieldPresent(aiData.consumer_care) 
         ? `Consumer Care details found: ${aiData.consumer_care.value}` 
         : 'Consumer care contact details missing'
     },
     {
       ruleId: 'country_of_origin_present',
       ruleName: 'Country of Origin',
-      status: aiData.country_of_origin?.value ? 'PASS' : 'FAIL',
-      message: aiData.country_of_origin?.value 
+      status: isFieldPresent(aiData.country_of_origin) ? 'PASS' : 'FAIL',
+      message: isFieldPresent(aiData.country_of_origin) 
         ? `Country of Origin declared: ${aiData.country_of_origin.value}` 
         : 'Country of origin missing'
     }
@@ -67,7 +72,6 @@ router.post('/inspect', protect, async (req, res) => {
   try {
     const { images, location } = req.body;
 
-    // Only images are strictly required from the mobile client
     if (!images || !Array.isArray(images) || images.length === 0) {
       return res.status(400).json({ error: 'At least one image is required.' });
     }
@@ -78,10 +82,9 @@ router.post('/inspect', protect, async (req, res) => {
     const useMock = process.env.USE_MOCK === 'true';
 
     if (useMock) {
-      aiData = getMockAiResponse(); // Returns the direct snake_case JSON format
+      aiData = getMockAiResponse();
     } else {
       try {
-        // Send raw base64 images to Python FastAPI OCR / VLM engine
         const pythonRes = await axios.post(`${process.env.PYTHON_AI_URL}/extract`, {
           images
         }, { timeout: 20000 });
@@ -93,33 +96,30 @@ router.post('/inspect', protect, async (req, res) => {
       }
     }
 
-    // Process rules and scoring directly from the new JSON format
     const { ruleResults, score, overallStatus, faults } = evaluateLmpcRules(aiData);
 
-    // Extract top-level text details safely from snake_case schema
     const productName = aiData.product_name?.value || 'Unlabeled Packaged Item';
     const company = aiData.manufacturer?.value || 'Unknown Manufacturer';
     const category = aiData.category || 'General Goods';
 
-    // Instantiate and populate Case document with explicitly structured extractedFields
     const caseDoc = new Case({
       caseId,
       productName,
       category,
       company,
-      createdBy: req.user._id, // Set automatically from JWT user
+      createdBy: req.user._id,
       images,
-      location: location || 'Kolkata, WB',
+      location: location || 'Unspecified Location',
       extractedFields: {
-        product_name: aiData.product_name,
-        manufacturer: aiData.manufacturer,
-        country_of_origin: aiData.country_of_origin,
-        net_quantity: aiData.net_quantity,
-        manufacture_date: aiData.manufacture_date,
-        best_before: aiData.best_before,
-        mrp: aiData.mrp,
-        consumer_care: aiData.consumer_care,
-        unit_sale_price: aiData.unit_sale_price
+        product_name: aiData.product_name || {},
+        manufacturer: aiData.manufacturer || {},
+        country_of_origin: aiData.country_of_origin || {},
+        net_quantity: aiData.net_quantity || {},
+        manufacture_date: aiData.manufacture_date || {},
+        best_before: aiData.best_before || {},
+        mrp: aiData.mrp || {},
+        consumer_care: aiData.consumer_care || {},
+        unit_sale_price: aiData.unit_sale_price || {}
       },
       ruleResults,
       overallStatus,
@@ -214,7 +214,7 @@ router.patch('/:id/review', protect, authorize('officer', 'admin'), async (req, 
 
     caseDoc.reviewAction = reviewAction;
     caseDoc.reviewReason = reviewReason;
-    caseDoc.reviewedBy = req.user._id; // Set automatically from JWT officer user
+    caseDoc.reviewedBy = req.user._id;
 
     if (reviewAction === 'overridden') {
       caseDoc.overallStatus = 'PASS';
