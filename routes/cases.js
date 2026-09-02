@@ -1,3 +1,181 @@
+// import express from 'express';
+// import mongoose from 'mongoose';
+// import axios from 'axios';
+// import Case from '../models/Case.js';
+// import User from '../models/User.js';
+// import AuditLog from '../models/AuditLog.js';
+// import { getMockAiResponse } from '../utils/mockData.js';
+// import { protect, authorize } from '../middleware/auth.js'; // Import middleware
+
+// const router = express.Router();
+
+// // 1. Mobile App Scan Endpoint (Inspector Protected - AI Extracts Metadata & Rules)
+// router.post('/inspect', protect, async (req, res) => {
+//   try {
+//     const { images, location } = req.body;
+
+//     // Only images are strictly required from the mobile client
+//     if (!images || !Array.isArray(images) || images.length === 0) {
+//       return res.status(400).json({ error: 'At least one image is required.' });
+//     }
+
+//     const caseId = `LM-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+
+//     let aiData;
+//     const useMock = process.env.USE_MOCK === 'true';
+
+//     if (useMock) {
+//       aiData = getMockAiResponse(); // Returns mock metadata + compliance extractions
+//     } else {
+//       try {
+//         // Send raw base64 images to Python FastAPI OCR / VLM engine
+//         const pythonRes = await axios.post(`${process.env.PYTHON_AI_URL}/extract`, {
+//           images
+//         }, { timeout: 20000 });
+
+//         aiData = pythonRes.data;
+//       } catch (err) {
+//         console.error("Python AI engine offline/error. Falling back to mock data.", err.message);
+//         aiData = getMockAiResponse();
+//       }
+//     }
+
+//     // Instantiate and populate Case document directly from AI extractions
+//     const caseDoc = new Case({
+//       caseId,
+//       productName: aiData.productName || 'Unlabeled Packaged Item',
+//       category: aiData.category || 'General Goods',
+//       company: aiData.company || 'Unknown Manufacturer',
+//       createdBy: req.user._id, // Set automatically from JWT user
+//       images,
+//       location: location || 'Kolkata, WB',
+//       extractedFields: aiData.extractedFields || {},
+//       ruleResults: aiData.ruleResults || [],
+//       overallStatus: aiData.overallStatus || 'INCOMPLETE',
+//       score: aiData.score || 0,
+//       faults: (aiData.ruleResults || [])
+//         .filter((r) => r.status === 'FAIL')
+//         .map((r) => r.ruleId)
+//     });
+
+//     await caseDoc.save();
+//     return res.status(201).json(caseDoc);
+
+//   } catch (err) {
+//     console.error('Inspection Route Error:', err);
+//     return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+//   }
+// });
+
+// // 2. Web Dashboard Fetch & Filter Endpoint (Protected)
+// router.get('/', protect, async (req, res) => {
+//   try {
+//     const { scoreMin, scoreMax, category, company, fault, status, period, limit = 20, page = 1 } = req.query;
+
+//     const query = {};
+
+//     if (scoreMin !== undefined || scoreMax !== undefined) {
+//       query.score = {
+//         $gte: Number(scoreMin ?? 0),
+//         $lte: Number(scoreMax ?? 100)
+//       };
+//     }
+
+//     if (category) query.category = category;
+//     if (company) query.company = company;
+//     if (fault) query.faults = fault;
+//     if (status) query.overallStatus = status;
+
+//     if (period === 'monthly') {
+//       const startOfMonth = new Date();
+//       startOfMonth.setDate(1);
+//       startOfMonth.setHours(0, 0, 0, 0);
+//       query.createdAt = { $gte: startOfMonth };
+//     }
+
+//     const cases = await Case.find(query)
+//       .populate({ path: 'createdBy', select: 'name officerId', strictPopulate: false })
+//       .sort({ createdAt: -1 })
+//       .skip((Math.max(1, Number(page)) - 1) * Number(limit))
+//       .limit(Number(limit));
+
+//     const total = await Case.countDocuments(query);
+
+//     return res.json({ total, page: Number(page), cases });
+//   } catch (err) {
+//     console.error('GET /api/cases Error:', err);
+//     return res.status(500).json({ error: 'Failed to fetch cases', details: err.message });
+//   }
+// });
+
+// // 3. Fetch Single Case Detail (Protected)
+// router.get('/:id', protect, async (req, res) => {
+//   try {
+//     const { id } = req.params;
+
+//     let caseDoc;
+//     if (mongoose.Types.ObjectId.isValid(id)) {
+//       caseDoc = await Case.findById(id).populate({ path: 'createdBy', select: 'name officerId', strictPopulate: false });
+//     } else {
+//       caseDoc = await Case.findOne({ caseId: id }).populate({ path: 'createdBy', select: 'name officerId', strictPopulate: false });
+//     }
+
+//     if (!caseDoc) return res.status(404).json({ error: 'Case not found' });
+//     return res.json(caseDoc);
+//   } catch (err) {
+//     console.error('GET /api/cases/:id Error:', err);
+//     return res.status(500).json({ error: 'Failed to fetch case detail', details: err.message });
+//   }
+// });
+
+// // 4. Officer Review & Override Endpoint (Officer/Admin Protected)
+// router.patch('/:id/review', protect, authorize('officer', 'admin'), async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const { reviewAction, reviewReason } = req.body;
+
+//     let caseDoc;
+//     if (mongoose.Types.ObjectId.isValid(id)) {
+//       caseDoc = await Case.findById(id);
+//     } else {
+//       caseDoc = await Case.findOne({ caseId: id });
+//     }
+
+//     if (!caseDoc) return res.status(404).json({ error: 'Case not found' });
+
+//     caseDoc.reviewAction = reviewAction;
+//     caseDoc.reviewReason = reviewReason;
+//     caseDoc.reviewedBy = req.user._id; // Set automatically from JWT officer user
+
+//     if (reviewAction === 'overridden') {
+//       caseDoc.overallStatus = 'PASS';
+//       caseDoc.score = 100;
+//     } else if (reviewAction === 'confirmed') {
+//       caseDoc.overallStatus = 'FAIL';
+//     }
+
+//     await caseDoc.save();
+
+//     await AuditLog.create({
+//       actorId: req.user._id,
+//       action: `CASE_REVIEW_${reviewAction.toUpperCase()}`,
+//       targetType: 'case',
+//       targetId: caseDoc._id,
+//       reason: reviewReason
+//     });
+
+//     return res.json(caseDoc);
+//   } catch (err) {
+//     console.error('PATCH /api/cases/:id/review Error:', err);
+//     return res.status(500).json({ error: 'Review action failed', details: err.message });
+//   }
+// });
+
+// export default router;
+
+
+
+
 import express from 'express';
 import mongoose from 'mongoose';
 import axios from 'axios';
@@ -5,9 +183,62 @@ import Case from '../models/Case.js';
 import User from '../models/User.js';
 import AuditLog from '../models/AuditLog.js';
 import { getMockAiResponse } from '../utils/mockData.js';
-import { protect, authorize } from '../middleware/auth.js'; // Import middleware
+import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
+
+// Helper function to evaluate LMPC compliance rules from the direct JSON structure
+const evaluateLmpcRules = (aiData) => {
+  const rules = [
+    {
+      ruleId: 'mrp_present',
+      ruleName: 'MRP Declaration',
+      status: aiData.mrp?.value ? 'PASS' : 'FAIL',
+      message: aiData.mrp?.value 
+        ? `MRP declared: ${aiData.mrp.unit || '₹'} ${aiData.mrp.value}` 
+        : 'Maximum Retail Price (MRP) declaration missing'
+    },
+    {
+      ruleId: 'net_qty_present',
+      ruleName: 'Net Quantity Standard',
+      status: aiData.net_quantity?.value ? 'PASS' : 'FAIL',
+      message: aiData.net_quantity?.value 
+        ? `Net Quantity declared: ${aiData.net_quantity.value} ${aiData.net_quantity.unit || ''}`.trim() 
+        : 'Net Quantity declaration missing'
+    },
+    {
+      ruleId: 'mfg_date_present',
+      ruleName: 'Date of Manufacture / Packing',
+      status: aiData.manufacture_date?.value ? 'PASS' : 'FAIL',
+      message: aiData.manufacture_date?.value 
+        ? `Mfg Date declared: ${aiData.manufacture_date.value}` 
+        : 'Date of manufacture or packing missing'
+    },
+    {
+      ruleId: 'consumer_care_present',
+      ruleName: 'Consumer Care Contact Details',
+      status: aiData.consumer_care?.value ? 'PASS' : 'FAIL',
+      message: aiData.consumer_care?.value 
+        ? `Consumer Care details found: ${aiData.consumer_care.value}` 
+        : 'Consumer care contact details missing'
+    },
+    {
+      ruleId: 'country_of_origin_present',
+      ruleName: 'Country of Origin',
+      status: aiData.country_of_origin?.value ? 'PASS' : 'FAIL',
+      message: aiData.country_of_origin?.value 
+        ? `Country of Origin declared: ${aiData.country_of_origin.value}` 
+        : 'Country of origin missing'
+    }
+  ];
+
+  const passedCount = rules.filter(r => r.status === 'PASS').length;
+  const score = Math.round((passedCount / rules.length) * 100);
+  const overallStatus = score === 100 ? 'PASS' : 'FAIL';
+  const faults = rules.filter(r => r.status === 'FAIL').map(r => r.ruleId);
+
+  return { ruleResults: rules, score, overallStatus, faults };
+};
 
 // 1. Mobile App Scan Endpoint (Inspector Protected - AI Extracts Metadata & Rules)
 router.post('/inspect', protect, async (req, res) => {
@@ -25,7 +256,7 @@ router.post('/inspect', protect, async (req, res) => {
     const useMock = process.env.USE_MOCK === 'true';
 
     if (useMock) {
-      aiData = getMockAiResponse(); // Returns mock metadata + compliance extractions
+      aiData = getMockAiResponse(); // Returns the direct snake_case JSON format
     } else {
       try {
         // Send raw base64 images to Python FastAPI OCR / VLM engine
@@ -40,22 +271,28 @@ router.post('/inspect', protect, async (req, res) => {
       }
     }
 
-    // Instantiate and populate Case document directly from AI extractions
+    // Process rules and scoring directly from the new JSON format
+    const { ruleResults, score, overallStatus, faults } = evaluateLmpcRules(aiData);
+
+    // Extract top-level text details safely from snake_case schema
+    const productName = aiData.product_name?.value || 'Unlabeled Packaged Item';
+    const company = aiData.manufacturer?.value || 'Unknown Manufacturer';
+    const category = aiData.category || 'General Goods';
+
+    // Instantiate and populate Case document
     const caseDoc = new Case({
       caseId,
-      productName: aiData.productName || 'Unlabeled Packaged Item',
-      category: aiData.category || 'General Goods',
-      company: aiData.company || 'Unknown Manufacturer',
+      productName,
+      category,
+      company,
       createdBy: req.user._id, // Set automatically from JWT user
       images,
       location: location || 'Kolkata, WB',
-      extractedFields: aiData.extractedFields || {},
-      ruleResults: aiData.ruleResults || [],
-      overallStatus: aiData.overallStatus || 'INCOMPLETE',
-      score: aiData.score || 0,
-      faults: (aiData.ruleResults || [])
-        .filter((r) => r.status === 'FAIL')
-        .map((r) => r.ruleId)
+      extractedFields: aiData, // Saves the raw structured JSON object directly
+      ruleResults,
+      overallStatus,
+      score,
+      faults
     });
 
     await caseDoc.save();
